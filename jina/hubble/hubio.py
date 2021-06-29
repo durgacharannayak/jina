@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 
 from .helper import archive_package, download_with_resume, parse_hub_uri, get_hubble_url
 from .hubapi import install_local, exist_local
+from .progress_bar import ProgressBar
 from ..excepts import HubDownloadError
 from ..helper import colored, get_full_version, get_readable_size, ArgNamespace
 from ..importer import ImportExtensions
@@ -77,6 +78,7 @@ class HubIO:
 
         with ImportExtensions(required=True):
             import requests
+            import requests_toolbelt
 
         pkg_path = Path(self.args.path)
         if not pkg_path.exists():
@@ -92,15 +94,13 @@ class HubIO:
                 bytesio = archive_package(pkg_path)
                 content = bytesio.getvalue()
                 md5_hash.update(content)
-
                 md5_digest = md5_hash.hexdigest()
+                total_size = bytesio.getbuffer().nbytes
 
             # upload the archived package
             form_data = {
-                'public': self.args.public if hasattr(self.args, 'public') else False,
-                'private': self.args.private
-                if hasattr(self.args, 'private')
-                else False,
+                'public': '1' if getattr(self.args, 'public', None) else '0',
+                'private': '1' if getattr(self.args, 'private', None) else '0',
                 'md5sum': md5_digest,
                 'force': self.args.force,
                 'secret': self.args.secret,
@@ -114,12 +114,24 @@ class HubIO:
                 f'Pushing to {hubble_url} ({method.upper()})',
                 self.logger,
             ):
-                resp = getattr(requests, method)(
-                    hubble_url,
-                    files={'file': content},
-                    data=form_data,
-                    headers=request_headers,
+                from requests_toolbelt import (
+                    MultipartEncoder,
+                    MultipartEncoderMonitor,
                 )
+
+                form_data['file'] = ('filename', bytesio)
+                encoder = MultipartEncoder(fields=form_data)
+
+                monitor = MultipartEncoderMonitor(
+                    encoder, lambda m: bar.update(steps=m.bytes_read)
+                )
+                request_headers.update({'Content-Type': monitor.content_type})
+                with ProgressBar('Uploading', total=encoder.len) as bar:
+                    resp = getattr(requests, method)(
+                        hubble_url,
+                        data=monitor,
+                        headers=request_headers,
+                    )
 
             if 200 <= resp.status_code < 300:
                 # TODO: only support single executor now
